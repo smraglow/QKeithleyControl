@@ -1,0 +1,20 @@
+name: jv_analysis
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - matplotlib
+  - scipy
+  - pyserial
+  - pyvisa
+  - pyvisa-py
+  - tk  # Required for Tkinter
+  - openpyxl
+  - xlrd
+  - pip
+  - pip:
+      - pyqt5  # Required for Tkinter-based file dialogs on some systems
