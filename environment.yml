@@ -7,7 +7,7 @@ dependencies:
   - python=3.9
   - numpy
   - pandas
-  - matplotlib
+  - matplotlib=3.4.3  # Downgraded Matplotlib
   - scipy
   - pyserial
   - pyvisa
@@ -15,6 +15,7 @@ dependencies:
   - tk  # Required for Tkinter
   - openpyxl
   - xlrd
+  - pyqt  # Install PyQt from Conda, not pip!
   - pip
   - pip:
-      - pyqt5  # Required for Tkinter-based file dialogs on some systems
+      - PyQtVisa  # Only install this via pip
