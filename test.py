@@ -1,12 +1,40 @@
+import tkinter as tk
+from tkinter import filedialog
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import pvlib
 import os
 from scipy.stats import linregress
-from DiodeFit_func import *
+
+def select_files():
+    """Opens a file dialog to allow the user to select multiple JV curve files."""
+    root = tk.Tk()
+    root.withdraw()
+    file_paths = filedialog.askopenfilenames(title="Select JV curve file(s)", filetypes=[("All Files", "*.*")])
+    root.destroy()
+    return file_paths
+
+def select_cell_area():
+    """Creates a GUI window for selecting the cell area before processing data."""
+    area_window = tk.Toplevel()
+    area_window.title("Select Cell Area")
+    area_window.attributes("-topmost", True)
+    cell_area = tk.DoubleVar(value=4)  # Default value
+    
+    def confirm_selection():
+        area_window.destroy()
+
+    tk.Label(area_window, text="Select Cell Area (cm²):").pack(pady=10)
+    tk.Radiobutton(area_window, text="4 cm²", variable=cell_area, value=4).pack(anchor=tk.W)
+    tk.Radiobutton(area_window, text="0.12 cm²", variable=cell_area, value=0.12).pack(anchor=tk.W)
+    tk.Button(area_window, text="OK", command=confirm_selection).pack(pady=10)
+    
+    area_window.wait_window()  # Ensure the function waits for user input
+    return cell_area.get()
 
 def extract_jv_data(file_path):
-    """ Extracts JV data from a file containing multiple scans and metadata sections. """
+    """Extracts JV data from a file containing multiple scans and metadata sections."""
     with open(file_path, "r", encoding="utf-8") as file:
         lines = file.readlines()
 
@@ -23,7 +51,7 @@ def extract_jv_data(file_path):
             if current_scan:  # Save the previous scan if data exists
                 df = pd.DataFrame(current_scan, columns=["t", "V", "I", "P"])
                 df = df.apply(pd.to_numeric, errors="coerce").dropna()  # Convert to numeric
-                scans[f"{current_desc}"] = df
+                scans[f"{current_desc}_{len(scans)+1}"] = df
 
             current_desc = line.split("__desc__")[-1].strip()
             current_scan = []
@@ -43,65 +71,42 @@ def extract_jv_data(file_path):
     if current_scan:
         df = pd.DataFrame(current_scan, columns=["t", "V", "I", "P"])
         df = df.apply(pd.to_numeric, errors="coerce").dropna()
-        scans[f"{current_desc}"] = df
+        scans[f"{current_desc}_{len(scans)+1}"] = df
 
     return scans
 
-def load_new_jv_data(file_paths, cell_area=0.12):
-    """Load JV data from the new format and return a dictionary of parsed data with metadata."""
+def load_jv_data(file_paths, cell_area):
+    """Load JV data from the new format, filtering out dark JV curves."""
     PIV_array = {}
     for file_path in file_paths:
         scan_data = extract_jv_data(file_path)
         for desc, df in scan_data.items():
             df["J (mA/cm²)"] = df["I"] * 1000 / cell_area  # Convert current to current density
+            df["Pmp"] = df["V"] * df["I"]  # Calculate power output
+
+            # Filter out dark curves: no significant current or power generation
+            if df["J (mA/cm²)"].abs().max() < 10 or df["Pmp"].max() < 0.01:
+                print(f"Skipping dark curve: {desc} in {file_path}")
+                continue
+
             key_name = f"{desc}_{os.path.basename(file_path)}"
             PIV_array[key_name] = df
     
     return PIV_array
 
-def analyze_jv_data(PIV_array, cell_area=0.12):
-    results = []
-    raw_jv_data = []
-    
-    for filename, jv_data in PIV_array.items():
-        voltage = jv_data["V"].values
-        current = jv_data["I"].values
-        current_density = jv_data["J (mA/cm²)"].values
-        
-        # Compute key JV parameters using existing function
-        res = FitNonIdealDiode(voltage, current_density, T=320, JV_type='light', take_log=False)
-        
-        analyzed_params = {
-            "File": filename,
-            "Voc (V)": res["Voc"],
-            "Jsc (mA/cm²)": res["Jsc"],
-            "Vmp (V)": res["Vmp"],
-            "Imp (A)": res["Imp"],
-            "Pmp (W)": res["Pmp"],
-            "Fill Factor (%)": res["FF"],
-            "PCE (%)": res["PCE"],
-            "Rs (Ohm cm²)": res["Rs"],
-            "Rsh (Ohm cm²)": res["Rsh"],
-        }
-        
-        # Store results
-        results.append(analyzed_params)
-        raw_jv_data.append(pd.DataFrame({"Voltage (V)": voltage, f"J (mA/cm²) {filename}": current_density}))
-    
-    return pd.DataFrame(results), pd.concat(raw_jv_data, axis=1)
-
 if __name__ == "__main__":
-    file_paths = ["multiple_scans_test"]
-    PIV_array = load_new_jv_data(file_paths)
-    analyzed_params_df, raw_jv_df = analyze_jv_data(PIV_array)
+    file_paths = select_files()
+    root = tk.Tk()
+    root.withdraw()
+    cell_area = select_cell_area()
+    root.destroy()
+    PIV_array = load_jv_data(file_paths, cell_area)
+    print("Loaded JV data, skipping dark curves.")
     
-    for i in range(0, len(analyzed_params_df.columns), 5):
-        print(analyzed_params_df.iloc[:, i:i+5].to_markdown())
-        print()
+    save_path = filedialog.asksaveasfilename(title="Save processed JV data", defaultextension=".xlsx", filetypes=[("Excel Files", "*.xlsx")])
+    if save_path:
+        with pd.ExcelWriter(save_path) as writer:
+            for key, df in PIV_array.items():
+                df.to_excel(writer, sheet_name=key[:31], index=False)  # Sheet names max length = 31 chars
     
-    save_path = "/mnt/data/JV_analysis_results.xlsx"
-    with pd.ExcelWriter(save_path) as writer:
-        analyzed_params_df.to_excel(writer, sheet_name="Extracted Parameters", index=False)
-        raw_jv_df.to_excel(writer, sheet_name="Raw JV Data", index=False)
-    
-    print("Analysis results saved successfully at:", save_path)
+    print("Filtered JV data saved successfully.")

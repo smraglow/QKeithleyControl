@@ -11,9 +11,27 @@ from DiodeFit_func import *
 def select_files():
     root = tk.Tk()
     root.withdraw()
-    file_paths = filedialog.askopenfilenames(title="Select JV curve file(s)", filetypes=[("Text Files", "*.txt"), ("All Files", "*.*")])
+    file_paths = filedialog.askopenfilenames(title="Select JV curve file(s)", filetypes=[("All Files", "*.*")])
     root.destroy()
     return file_paths
+
+def select_cell_area():
+    """Creates a GUI window for selecting the cell area before processing data."""
+    area_window = tk.Toplevel()
+    area_window.title("Select Cell Area")
+    area_window.attributes("-topmost", True)
+    cell_area = tk.DoubleVar(value=4)  # Default value
+    
+    def confirm_selection():
+        area_window.destroy()
+
+    tk.Label(area_window, text="Select Cell Area (cm²):").pack(pady=10)
+    tk.Radiobutton(area_window, text="4 cm²", variable=cell_area, value=4).pack(anchor=tk.W)
+    tk.Radiobutton(area_window, text="0.12 cm²", variable=cell_area, value=0.12).pack(anchor=tk.W)
+    tk.Button(area_window, text="OK", command=confirm_selection).pack(pady=10)
+    
+    area_window.wait_window()  # Ensure the function waits for user input
+    return cell_area.get()
 
 def extract_jv_data(file_path):
     """ Extracts JV data from a file containing multiple scans and metadata sections. """
@@ -28,16 +46,18 @@ def extract_jv_data(file_path):
     for line in lines:
         line = line.strip()
 
-        # Detect new scan metadata
-        if line.startswith("#! __desc__"):
+        if line.startswith("#! __data__"):
+            print("Data section detected")
             if current_scan:  # Save the previous scan if data exists
-                df = pd.DataFrame(current_scan, columns=["t", "V", "I", "P"])
-                df = df.apply(pd.to_numeric, errors="coerce").dropna()  # Convert to numeric
-                scans[f"{current_desc}"] = df
-
-            current_desc = line.split("__desc__")[-1].strip()
+                    df = pd.DataFrame(current_scan, columns=["t", "V", "I", "P"])
+                    df = df.apply(pd.to_numeric, errors="coerce").dropna()  # Convert to numeric
+                    scans[f"{current_desc}_{len(scans)+1}"] = df
             current_scan = []
             reading_data = False  # Reset flag
+        # Detect new scan metadata
+        elif line.startswith("#! __desc__"):
+            
+            current_desc = line.split("__desc__")[-1].strip()
 
         # Detect data header and start reading
         elif line.startswith("t"):
@@ -53,7 +73,7 @@ def extract_jv_data(file_path):
     if current_scan:
         df = pd.DataFrame(current_scan, columns=["t", "V", "I", "P"])
         df = df.apply(pd.to_numeric, errors="coerce").dropna()
-        scans[f"{current_desc}"] = df
+        scans[f"{current_desc}_{len(scans)+1}"] = df
 
     return scans
 
@@ -62,8 +82,39 @@ def load_jv_data(file_paths, cell_area=0.12):
     PIV_array = {}
     for file_path in file_paths:
         scan_data = extract_jv_data(file_path)
+        print(scan_data)
         for desc, df in scan_data.items():
             df["J (mA/cm²)"] = df["I"] * 1000 / cell_area  # Convert current to current density
+
+            # plot unrectified JV curve
+
+            # plt.figure()
+            # plt.plot(df["V"], df["J (mA/cm²)"], 'o')
+            # plt.ylabel('Current density [mA/cm²]')
+            # plt.xlabel('Voltage [V]')
+            # plt.title(f'JV Curve for {file_path}_{desc}')
+            # plt.show()
+
+
+            darktest_v, darktest_c = pvlib.ivtools.utils.rectify_iv_curve(df["V"].values, -df["I"].values*1000/cell_area)
+            darktest_p = darktest_v * darktest_c
+            #plot the JV curve 
+            # plt.figure()
+            # plt.plot(darktest_v, darktest_c, 'o')
+            # plt.ylabel('Current density [mA/cm²]')
+            # plt.twinx().plot(darktest_v, darktest_p, 'r-', label='Power')
+            # plt.ylabel('Power [W]')
+            # plt.xlabel('Voltage [V]')
+            
+            # plt.title(f'JV Curve for {file_path}_{desc}')
+            # plt.show()
+
+            # Filter out dark curves: no significant current or power generation
+            if darktest_c.size == 0 or darktest_c.max() < 1 or darktest_p.max() < 0.001:  # Adjust the threshold as needed
+                print(f"Skipping dark curve: {desc} in {file_path}")
+                continue
+
+
             key_name = f"{desc}_{os.path.basename(file_path)}"
             PIV_array[key_name] = df
     
@@ -92,17 +143,14 @@ def compute_resistances(voltage, current, Voc, Isc):
         Rs, Rsh = np.nan, np.nan
     return Rs, Rsh
 
-def analyze_jv_data(PIV_array):
+def analyze_jv_data(PIV_arra, cell_area=0.12):
     results = []
     raw_jv_data = []
     for filename, jv_data in PIV_array.items():
         voltage = jv_data["V"].values
         current = -jv_data["I"].values
         voltage, current = pvlib.ivtools.utils.rectify_iv_curve(voltage, current) # Rectify the JV curve
-        current_density_SI = - current/(0.12/10000) # A/m^2 for fitting to non-ideal diode model
-        # cell_area = 0.12
-        cell_area = 4 # cm^2        
-        
+        current_density_SI = - current/(cell_area/10000) # A/m^2 for fitting to non-ideal diode model     
         
         extracted_params = pvlib.ivtools.utils.astm_e1036(voltage, current)
         # res = FitNonIdealDiode(voltage,current_density_SI,T=320,JV_type='light',take_log=False) # Fit the data to a single diode model
@@ -164,7 +212,6 @@ def analyze_jv_data(PIV_array):
         jsc_idx = np.argmin(np.abs(current_density - extracted_params["isc"]*1000/cell_area))
         rs_slope = 1 / (Rs_num * cell_area / 1000)
         rsh_slope = 1 / (Rsh_num * cell_area / 1000)
-        print(rs_slope)
         # Plot the linear fit for Rs
         if not np.isnan(Rs_num):
             plt.plot(voltage[voc_idx-20:voc_idx], (voltage[voc_idx-20:voc_idx]-voc) * rs_slope , 'r-', label='Series Resistance Fit')
@@ -180,6 +227,9 @@ def analyze_jv_data(PIV_array):
         plt.ylim(0, 1.1 * extracted_params["isc"]*1000/cell_area)
         plt.legend()
         plt.grid()
+        plt.twinx().plot(voltage, voltage * current, 'b-', label='Power (W)')
+        plt.ylabel("Power (W)")
+        plt.legend()
         plt.show()
 
         
@@ -191,8 +241,12 @@ def analyze_jv_data(PIV_array):
 
 if __name__ == "__main__":
     file_paths = select_files()
-    PIV_array = load_jv_data(file_paths)
-    analyzed_params_df, raw_jv_df = analyze_jv_data(PIV_array)
+    root = tk.Tk()
+    root.withdraw()
+    cell_area = select_cell_area()
+    root.destroy()
+    PIV_array = load_jv_data(file_paths, cell_area=cell_area)
+    analyzed_params_df, raw_jv_df = analyze_jv_data(PIV_array, cell_area=cell_area)
     
     
     for i in range(0, len(analyzed_params_df.columns), 5):
